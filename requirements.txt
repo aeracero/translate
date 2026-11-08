@@ -1,2 +1,2 @@
 discord.py>=2.3
-deep-translator>=1.11
+deepl>=1.16

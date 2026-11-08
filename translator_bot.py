@@ -1,13 +1,18 @@
 import os
 import re
 import asyncio
+from functools import lru_cache
 
+import deepl
 import discord
 from discord import app_commands
 from discord.ext import commands
-from deep_translator import GoogleTranslator
 
 TOKEN = os.environ["DISCORD_TOKEN"]
+DEEPL_KEY = os.environ["DEEPL_API_KEY"]  # Free版のキーは末尾が ":fx"
+
+# Free/Pro はキーから自動判別されます
+translator = deepl.Translator(DEEPL_KEY)
 
 # ひらがな・カタカナ・漢字・半角カナ
 JP_RE = re.compile(r"[\u3040-\u30ff\u4e00-\u9fff\uff66-\uff9f]")
@@ -23,17 +28,23 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 active_channels: set[int] = set()
 
 
-def detect_direction(text: str):
-    """日本語の文字があれば ja→en、なければ英字があれば en→ja。"""
+def detect_target(text: str):
+    """日本語の文字があれば英語へ、なければ英字があれば日本語へ。"""
     if JP_RE.search(text):
-        return "ja", "en"
+        return "EN-US"
     if EN_RE.search(text):
-        return "en", "ja"
+        return "JA"
     return None
 
 
-def translate(text: str, src: str, tgt: str) -> str:
-    return GoogleTranslator(source=src, target=tgt).translate(text[:4900])
+@lru_cache(maxsize=512)  # 同じ文は再リクエストせず文字数を節約
+def _deepl(text: str, target: str) -> str:
+    result = translator.translate_text(text, target_lang=target)
+    return result.text
+
+
+async def translate(text: str, target: str) -> str:
+    return await asyncio.to_thread(_deepl, text, target)
 
 
 group = app_commands.Group(name="translate", description="リアルタイム日英翻訳")
@@ -59,6 +70,18 @@ async def status(interaction: discord.Interaction):
     )
 
 
+@group.command(name="usage", description="DeepLの今月の使用文字数を表示します")
+async def usage(interaction: discord.Interaction):
+    u = await asyncio.to_thread(translator.get_usage)
+    c = u.character
+    if c.valid:
+        pct = c.count / c.limit * 100
+        msg = f"📊 {c.count:,} / {c.limit:,} 文字（{pct:.1f}%）"
+    else:
+        msg = "使用量を取得できませんでした"
+    await interaction.response.send_message(msg, ephemeral=True)
+
+
 bot.tree.add_command(group)
 
 
@@ -77,21 +100,24 @@ async def on_message(message: discord.Message):
     if not text:
         return
 
-    direction = detect_direction(text)
-    if direction is None:
+    target = detect_target(text)
+    if target is None:
         return
-    src, tgt = direction
 
     try:
-        result = await asyncio.to_thread(translate, text, src, tgt)
-    except Exception as e:
-        print(f"translate error: {e}")
+        result = await translate(text, target)
+    except deepl.QuotaExceededException:
+        await message.channel.send("⚠️ DeepLの今月の無料枠を使い切りました。")
+        active_channels.discard(message.channel.id)
+        return
+    except deepl.DeepLException as e:
+        print(f"deepl error: {e}")
         return
 
     if not result or result.strip() == text:
         return
 
-    flag = "🇺🇸" if tgt == "en" else "🇯🇵"
+    flag = "🇺🇸" if target == "EN-US" else "🇯🇵"
     await message.reply(f"{flag} {result}", mention_author=False)
 
 
