@@ -24,8 +24,8 @@ intents = discord.Intents.default()
 intents.message_content = True  # Developer Portal でも有効化が必要
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# 翻訳が有効なチャンネルID（再起動で消えます）
-active_channels: set[int] = set()
+# 翻訳が有効なユーザーID（再起動で消えます）
+active_users: set[int] = set()
 
 
 def detect_target(text: str):
@@ -50,21 +50,25 @@ async def translate(text: str, target: str) -> str:
 group = app_commands.Group(name="translate", description="リアルタイム日英翻訳")
 
 
-@group.command(name="start", description="このチャンネルで翻訳を開始します")
+@group.command(name="start", description="自分の発言の翻訳を開始します")
 async def start(interaction: discord.Interaction):
-    active_channels.add(interaction.channel_id)
-    await interaction.response.send_message("🌐 翻訳を開始しました（日本語⇄英語）")
+    active_users.add(interaction.user.id)
+    await interaction.response.send_message(
+        "🌐 あなたの発言の翻訳を開始しました（日本語⇄英語）", ephemeral=True
+    )
 
 
-@group.command(name="stop", description="このチャンネルの翻訳を停止します")
+@group.command(name="stop", description="自分の発言の翻訳を停止します")
 async def stop(interaction: discord.Interaction):
-    active_channels.discard(interaction.channel_id)
-    await interaction.response.send_message("⏹️ 翻訳を停止しました")
+    active_users.discard(interaction.user.id)
+    await interaction.response.send_message(
+        "⏹️ あなたの発言の翻訳を停止しました", ephemeral=True
+    )
 
 
-@group.command(name="status", description="翻訳が有効か確認します")
+@group.command(name="status", description="自分の翻訳が有効か確認します")
 async def status(interaction: discord.Interaction):
-    on = interaction.channel_id in active_channels
+    on = interaction.user.id in active_users
     await interaction.response.send_message(
         "✅ 有効です" if on else "❌ 無効です", ephemeral=True
     )
@@ -93,7 +97,7 @@ async def on_ready():
 
 @bot.event
 async def on_message(message: discord.Message):
-    if message.author.bot or message.channel.id not in active_channels:
+    if message.author.bot or message.author.id not in active_users:
         return
 
     text = STRIP_RE.sub("", message.content).strip()
@@ -107,8 +111,9 @@ async def on_message(message: discord.Message):
     try:
         result = await translate(text, target)
     except deepl.QuotaExceededException:
-        await message.channel.send("⚠️ DeepLの今月の無料枠を使い切りました。")
-        active_channels.discard(message.channel.id)
+        # 枠は全員共通なので全ユーザーを停止
+        await message.channel.send("⚠️ DeepLの今月の無料枠を使い切ったため、翻訳を停止しました。")
+        active_users.clear()
         return
     except deepl.DeepLException as e:
         print(f"deepl error: {e}")
